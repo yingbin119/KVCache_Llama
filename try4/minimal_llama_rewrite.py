@@ -68,22 +68,23 @@ class MyLlamaAttention(LlamaAttention):
         input_shape = hidden_states.shape[:-1]
         hidden_shape = (*input_shape, -1, self.head_dim)
 
+        #--------------用：match_KV + 拼接--------------#
         query_states = self.q_proj(hidden_states).view(hidden_shape).transpose(1, 2)
         key_states = self.k_proj(hidden_states).view(hidden_shape).transpose(1, 2)
         value_states = self.v_proj(hidden_states).view(hidden_shape).transpose(1, 2)
 
         #-------------当前prompt的K,V已经计算完成，存储下来后续使用，先不rope-----------#
-        # if flags["is_prefill"]==0 and 0 <= self.layer_idx <= 15 :
-        #     KV_cache.add(layer_id=self.layer_idx, 
-        #                  K_states=key_states, 
-        #                  V_states=value_states)
+        #------------存：KV_cache--------#
+        if flags["is_prefill"]==0 and 0 <= self.layer_idx <= 15 :
+            KV_cache.add(layer_id=self.layer_idx, 
+                         K_states=key_states, 
+                         V_states=value_states)
         #-----------------------------------------------------------------#
         
 
         cos, sin = position_embeddings
         query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin)
 
-            
         
         #----------标记prefill阶段结束-------------#
         if self.layer_idx==15:

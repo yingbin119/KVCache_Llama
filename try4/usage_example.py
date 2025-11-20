@@ -103,6 +103,11 @@ def test_pretrained_loading():
                                                 inputs["input_ids"][:,best_start:], 
                                                 inputs["input_ids"][:,1:best_start]
                                                 ],dim=1)
+                
+            #------匹配到存储库里面的prompt KV，先存储下来，避免被挤走---#
+            #------传参时也传match_KV用于取--------------#
+            match_KV = KV_cache.storage[best_idx]["states"]
+            logging.info("match_KV: layer_id=1  K_shape %s  V_shape %s",match_KV[1]["K_states"].shape, match_KV[1]["K_states"].shape)
         #--------------------------------#
         print(f"调配后的关键词编码:",inputs["input_ids"])
         # 将关键词加入缓存
@@ -142,7 +147,7 @@ def test_pretrained_loading():
         else:
             decoded_cont = tokenizer.decode(continuation_ids, skip_special_tokens=True)
         decoded_cont = re.sub(r'_xref[^;]*;', '', decoded_cont)
-        logging.info("Generated: %s", decoded_cont)
+        # logging.info("Generated: %s", decoded_cont)
     KV_cache.show()
     return model, tokenizer
 
