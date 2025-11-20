@@ -13,6 +13,7 @@ from match import find_prefix_matches
 from KV_Cache import RecordStorage
 from log import setup_file_logger   
 import logging
+import time
 
 setup_file_logger("kv_cache.log")  
 
@@ -53,12 +54,20 @@ def test_pretrained_loading():
     
     # 测试推理 - 批量 prompts 版本
     prompts = [
-        "对早期肺结节患者，哪些影像学特征和实验室结果有助于癌症筛查？",
-        "乳腺肿块患者，影像学特征与血清指标联合分析有什么诊断价值？",
-        "超声影像与乳腺肿块生物标志物如何判断良恶性？",
-        "如何通过影像学和实验室指标综合鉴别早期肺癌与良性肺结节？",
-        "如何通过影像和实验室检查评估乳腺结节的恶性风险？",
-        "影像学与血液指标如何联合判断早期肺癌和良性结节？"
+        "影像学",
+        # "如何通过影像学和实验室指标综合鉴别早期肺癌与良性结节？",
+        "对影像学和实验室指标综合鉴别早期肺癌与良性结节的方法做出介绍。",
+        # "介绍通过影像学和实验室指标综合鉴别早期肺癌与良性结节的方法。",
+        # "早期肺癌与良性结节可通过哪些影像学和实验室指标进行综合判断？",
+        # "影像学特征与实验室数据如何协同判断早期肺癌与良性结节？",
+        # "怎样结合影像学与实验室指标实现早期肺癌与良性结节的准确区分？",
+        "结合影像学表现与实验室指标，如何鉴别早期肺癌与良性结节？",
+        "对影像学和实验室指标综合鉴别早期肺癌与良性结节的方法做出介绍。",
+        "对影像学和实验室指标综合鉴别早期肺癌与良性结节的方法做出介绍。",
+        "对影像学和实验室指标综合鉴别早期肺癌与良性结节的方法做出介绍。",
+        "对影像学和实验室指标综合鉴别早期肺癌与良性结节的方法做出介绍。",
+        "对影像学和实验室指标综合鉴别早期肺癌与良性结节的方法做出介绍。",
+        # "对影像学和实验室指标综合鉴别早期肺癌与良性结节的方法做出介绍。",
     ]  
     #提取关键词
     extractor = OrderedKeywordExtractor(local_dir='/home/xiaohai/yingbin1/MY_Llama3/KeyWord/models')
@@ -68,13 +77,14 @@ def test_pretrained_loading():
         prompts[i] = combined
     
     #前缀复用缓存器
-    KV_cache = RecordStorage(max_size=4)
+    KV_cache = RecordStorage(max_size=10)
     # 使用 padding=True 让不同长度的 prompt 对齐为 batch
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
     tokenizer.padding_side = "left"  
     
     logging.info("提取关键词后初始的prompts: %s", prompts)
+    total_time = 0.0
     for i, prompt in enumerate(prompts):
         logging.info("--- prompt {%s} ---",i)
         logging.info("input (keywords): %s", prompt)
@@ -82,38 +92,38 @@ def test_pretrained_loading():
         inputs = tokenizer(prompt, return_tensors="pt", truncation=True, padding=True)        
         # 将输入移动到模型所在设备
         inputs = {k: v.to(device) for k, v in inputs.items()}
-        print("tokenizer后的input编码:",inputs["input_ids"])
+        logging.info("经过tokenizer的input编码: %s",inputs["input_ids"])
         # 兼容某些 tokenizer 不返回 attention_mask 的情况
         if "attention_mask" not in inputs:
             inputs["attention_mask"] = torch.ones_like(inputs["input_ids"], device=device)
         # 计算输入真实长度（attention_mask 的和）
         input_length = int(inputs["attention_mask"].sum(dim=1).long().item())
         logging.info("input length: %s", input_length)
-        
         #------------当前prompt的inputs_id和存储器中的比较---------------# 
         max_k, best_start, best_idx = 0, None, -1
+        match_KV = None
         A=inputs["input_ids"]
         if len(KV_cache.storage)>0:
             _,inputs_id_list = KV_cache.check()
             best_idx, max_k, best_start = find_prefix_matches(A=A, sequences=inputs_id_list)
-            print(f"当前prompt:{i}  最优匹配--best_idx:{best_idx}  max_k:{max_k}  best_start:{best_start}")
+            print(f"当前prompt:{i}  最优匹配--best_idx: prompt：{best_idx}  max_k:{max_k}  best_start:{best_start}")
             # 根据前缀匹配调整当前prompt中token的位置
             if best_start is not None and best_idx != -1:
                 inputs["input_ids"] = torch.cat([inputs["input_ids"][:,:1], 
                                                 inputs["input_ids"][:,best_start:], 
                                                 inputs["input_ids"][:,1:best_start]
-                                                ],dim=1)
-                
-            #------匹配到存储库里面的prompt KV，先存储下来，避免被挤走---#
-            #------传参时也传match_KV用于取--------------#
-            match_KV = KV_cache.storage[best_idx]["states"]
-            logging.info("match_KV: layer_id=1  K_shape %s  V_shape %s",match_KV[1]["K_states"].shape, match_KV[1]["K_states"].shape)
+                                                ],dim=1)                
+                #------匹配到存储库里面的prompt KV，先存储下来，避免被挤走---#
+                #------传参时也传match_KV用于取--------------#
+                match_KV = KV_cache.storage[best_idx]["states"]
+                logging.info("match_KV: layer_id=1时， K_shape: %s  V_shape: %s",match_KV[1]["K_states"].shape, match_KV[1]["K_states"].shape)
         #--------------------------------#
         print(f"调配后的关键词编码:",inputs["input_ids"])
         # 将关键词加入缓存
         KV_cache.add(keywords=prompt,
                      inputs_id=inputs["input_ids"])
         # 单条生成
+        start_time = time.time()
         generated = model.generate(
             inputs["input_ids"],
             attention_mask=inputs["attention_mask"],
@@ -123,9 +133,14 @@ def test_pretrained_loading():
             pad_token_id=tokenizer.eos_token_id,
             flags={"is_prefill": 0},
             KV_cache=KV_cache,  # 传入 KV_cache
-            best_idx=best_idx, 
-            max_k=max_k
+            best_idx=-1, #-1 
+            max_k=0,  #0
+            match_KV = None #None
         )
+        end_time = time.time()
+        elapsed_time = end_time - start_time
+        total_time += elapsed_time
+        print(f"prompt {i} Generate took {elapsed_time:.3f} seconds")
         # generated 形状通常是 (1, seq_len_generated)，取第一行
         gen_ids = generated[0].cpu()
         total_len = gen_ids.size(0)
@@ -147,7 +162,8 @@ def test_pretrained_loading():
         else:
             decoded_cont = tokenizer.decode(continuation_ids, skip_special_tokens=True)
         decoded_cont = re.sub(r'_xref[^;]*;', '', decoded_cont)
-        # logging.info("Generated: %s", decoded_cont)
+        logging.info("Generated: %s", decoded_cont)
+    print(f"Total time for all prompts: {total_time:.3f} seconds")
     KV_cache.show()
     return model, tokenizer
 

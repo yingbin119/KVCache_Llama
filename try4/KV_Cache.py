@@ -23,10 +23,6 @@ class RecordStorage:
     
     def add(self, keywords=None, inputs_id=None, layer_id=None, K_states=None, V_states=None):
         """添加或补充一条数据"""
-        # K_states = self._to_list_if_tensor(K_states)
-        # V_states = self._to_list_if_tensor(V_states)
-        # inputs_id = inputs_id.squeeze()
-        # inputs_id = self._to_list_if_tensor(inputs_id)
         # 情况 1：只传 keywords（先存关键词）
         if keywords is not None and K_states is None and V_states is None:
             inputs_id = inputs_id.squeeze()

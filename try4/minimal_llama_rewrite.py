@@ -24,6 +24,8 @@ from transformers.models.llama.modeling_llama import (
 )
 from safetensors.torch import load_file as safetensors_load 
 from KV_Cache import RecordStorage
+import logging
+import time
 
 class MyLlamaConfig(LlamaConfig):
     """扩展配置，添加自定义参数"""
@@ -42,14 +44,12 @@ class MyLlamaAttention(LlamaAttention):
     def __init__(self, config: MyLlamaConfig, layer_idx: Optional[int] = None):
         # 完全继承父类的初始化，保持权重名称一致
         super().__init__(config, layer_idx)
-        #从 config 对象中获取名为 "my_attention_param" 的属性。
-        #如果 config 中没有这个属性，就使用默认值 0.1。
         self.my_attention_param = getattr(config, "my_attention_param", 0.1)
         self.flag = getattr(config, "flag", -1)
         self.num_heads = config.num_attention_heads
         self.num_key_value_heads = config.num_key_value_heads
         self.hidden_size = config.hidden_size
-        # print("Your own Attention:", self.flag)
+        
         
     @deprecate_kwarg("past_key_value", new_name="past_key_values", version="4.58")
     def forward(
@@ -63,16 +63,54 @@ class MyLlamaAttention(LlamaAttention):
         KV_cache: Optional["RecordStorage"] = None,
         best_idx: Optional[int] = None,                     
         max_k: Optional[int] = None, 
+        match_KV: Optional[list] = None,
         **kwargs,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         input_shape = hidden_states.shape[:-1]
         hidden_shape = (*input_shape, -1, self.head_dim)
-
         #--------------用：match_KV + 拼接--------------#
-        query_states = self.q_proj(hidden_states).view(hidden_shape).transpose(1, 2)
-        key_states = self.k_proj(hidden_states).view(hidden_shape).transpose(1, 2)
-        value_states = self.v_proj(hidden_states).view(hidden_shape).transpose(1, 2)
+        if flags["is_prefill"]==0 and 0 <= self.layer_idx <= 15 :
+            logging.info("hidden_states.shape: %s",hidden_states.shape)
 
+        query_states = self.q_proj(hidden_states).view(hidden_shape).transpose(1, 2)
+
+        if flags["is_prefill"] == 0 and best_idx != -1 and match_KV != None: 
+            #--------------prefill阶段，匹配到，调用已经缓存的token-----------#
+            logging.info("调用已经缓存的token!!!")
+
+            start = time.time()
+            cached_K = match_KV[self.layer_idx]["K_states"]   # (B, H, cached_len, head_dim)
+            cached_V = match_KV[self.layer_idx]["V_states"]   # (B, H, cached_len, head_dim)  
+            end = time.time()
+            during = end - start
+            logging.info("KV Cache 加载花费 %s seconds!!",during)
+                        
+            cached_K_part = cached_K[:, :, :max_k, :]   # (B_cache, H, max_k, head_dim)
+            cached_V_part = cached_V[:, :, :max_k, :]   # (B_cache, H, max_k, head_dim)
+            #--------------计算新的token-----------------#
+            _, L, _ = hidden_states.shape
+            if L > max_k:
+                new_hidden = hidden_states[:, max_k:, :]
+                tmp_shape = new_hidden.shape[:-1]
+                new_hidden_shape = (*tmp_shape, -1, self.head_dim)
+
+                start = time.time()
+                new_k = self.k_proj(new_hidden).reshape(new_hidden_shape).transpose(1, 2)
+                new_v = self.v_proj(new_hidden).reshape(new_hidden_shape).transpose(1, 2)
+                end = time.time()
+                during = end - start
+                logging.info("KV Cache 重计算花费 %s seconds!!",during)
+                logging.info("new_k.shape: %s; new_v.shape: %s",new_k.shape,new_v.shape)
+                key_states = torch.cat([cached_K_part, new_k], dim=2)
+                value_states = torch.cat([cached_V_part, new_v], dim=2)
+            else:
+                key_states = cached_K_part
+                value_states = cached_V_part
+
+        else:
+            #--------------没匹配到，或不在prefill阶段，自己计算-----------#
+            key_states = self.k_proj(hidden_states).view(hidden_shape).transpose(1, 2)
+            value_states = self.v_proj(hidden_states).view(hidden_shape).transpose(1, 2)   
         #-------------当前prompt的K,V已经计算完成，存储下来后续使用，先不rope-----------#
         #------------存：KV_cache--------#
         if flags["is_prefill"]==0 and 0 <= self.layer_idx <= 15 :
@@ -80,17 +118,12 @@ class MyLlamaAttention(LlamaAttention):
                          K_states=key_states, 
                          V_states=value_states)
         #-----------------------------------------------------------------#
-        
-
         cos, sin = position_embeddings
-        query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin)
-
-        
+        query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin)      
         #----------标记prefill阶段结束-------------#
         if self.layer_idx==15:
             flags["is_prefill"]=1  
         #------------------------------------------------------------------#        
-
         #同一prompt的KV缓存
         if past_key_values is not None:   #对象只要创建了就可以
             cache_kwargs = {"sin": sin, "cos": cos, "cache_position": cache_position}
@@ -137,13 +170,11 @@ class MyLlamaDecoderLayer(LlamaDecoderLayer):
         KV_cache: Optional["RecordStorage"] = None,
         best_idx: Optional[int] = None,                     # 可选的索引/控制参数
         max_k: Optional[int] = None,
+        match_KV: Optional[list] = None,
         **kwargs: Unpack[TransformersKwargs],
     ) -> torch.Tensor:
         residual = hidden_states
         hidden_states = self.input_layernorm(hidden_states)
-        # if(flags["is_prefill"]==0 and self.layer_idx==0):
-        #     print("Your own LlamaDecoderLayer:",flags["is_prefill"])
-        # Self Attention
         hidden_states, _ = self.self_attn(
             hidden_states=hidden_states,
             attention_mask=attention_mask,
@@ -156,6 +187,7 @@ class MyLlamaDecoderLayer(LlamaDecoderLayer):
             KV_cache=KV_cache,
             best_idx=best_idx, 
             max_k=max_k,
+            match_KV = match_KV,
             **kwargs,
         )
         hidden_states = residual + hidden_states
@@ -190,6 +222,7 @@ class MyLlamaModel(LlamaModel):
         KV_cache: Optional["RecordStorage"] = None,
         best_idx: Optional[int] = None,                     # 可选的索引/控制参数
         max_k: Optional[int] = None,
+        match_KV: Optional[list] = None,
         **kwargs: Unpack[TransformersKwargs],
     ) -> BaseModelOutputWithPast:
         """
@@ -206,6 +239,7 @@ class MyLlamaModel(LlamaModel):
             KV_cache (RecordStorage, optional): 自定义 KV cache，用于存/取 attention KV。
             best_idx (int, optional): 用户自定义索引。
             max_k (int, optional): 用户自定义参数。
+            match_KV (list, optional): 匹配的prompt的KV。
             **kwargs:
                 Additional arguments passed to submodules.
         Returns:
@@ -256,6 +290,7 @@ class MyLlamaModel(LlamaModel):
                 KV_cache=KV_cache,
                 best_idx=best_idx, 
                 max_k=max_k,
+                match_KV = match_KV,
                 **kwargs,
             )
 
@@ -356,6 +391,7 @@ class MyLlamaForCausalLM(LlamaForCausalLM):
         KV_cache: Optional["RecordStorage"] = None,
         best_idx: Optional[int] = None,                     # 可选的索引/控制参数
         max_k: Optional[int] = None,
+        match_KV: Optional[list] = None,
         **kwargs: Unpack[TransformersKwargs],
     ) -> CausalLMOutputWithPast:
         """
@@ -372,18 +408,12 @@ class MyLlamaForCausalLM(LlamaForCausalLM):
             KV_cache (RecordStorage, optional): 自定义 KV cache，用于存/取 attention KV。
             best_idx (int, optional): 用户自定义索引。
             max_k (int, optional): 用户自定义参数。
+            match_KV (list, optional): 匹配的prompt的KV。
             **kwargs:
                 Additional arguments passed to submodules.
         Returns:
             [`BaseModelOutputWithPast`]: Model outputs with hidden states and optional past key values.
         """
-        #模型调用返回
-        #last_hidden_state: Optional[torch.FloatTensor] 
-        #past_key_values: Optional[Cache] 
-        #hidden_states: Optional[tuple[torch.FloatTensor, ...]]
-        #attentions: Optional[tuple[torch.FloatTensor, ...]]
-        # if(flags["is_prefill"]==0):
-        #     print("Your own LlamaForCausalLM:",flags["is_prefill"])
         outputs: BaseModelOutputWithPast = self.model(
             input_ids=input_ids,
             attention_mask=attention_mask,
@@ -396,6 +426,7 @@ class MyLlamaForCausalLM(LlamaForCausalLM):
             KV_cache=KV_cache,
             best_idx=best_idx, 
             max_k=max_k,
+            match_KV = match_KV,
             **kwargs,
         )
 
